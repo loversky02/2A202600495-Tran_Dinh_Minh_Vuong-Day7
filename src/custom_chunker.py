@@ -117,6 +117,124 @@ class FAQChunker:
         return chunks
 
 
+class FinancialNewsChunker:
+    """
+    Custom chunker designed for financial news articles.
+    
+    Design rationale:
+    - Financial news has specific structure: headline, key data, analysis, market reaction
+    - Economic indicators (numbers, percentages) should stay with context
+    - Section headers like "Key Highlights:", "Market Impact:" are semantic boundaries
+    - Preserving data tables and bullet points improves retrieval accuracy
+    
+    Strategy:
+    - Detect section headers (lines ending with ":")
+    - Keep data points (numbers, percentages) with their context
+    - Split at paragraph boundaries when sections are too large
+    - Preserve bullet lists as complete units
+    """
+    
+    def __init__(self, max_chunk_size: int = 600):
+        self.max_chunk_size = max_chunk_size
+    
+    def chunk(self, text: str) -> list[str]:
+        if not text:
+            return []
+        
+        # Split by section headers (lines ending with ":")
+        lines = text.split('\n')
+        chunks = []
+        current_section = []
+        current_header = None
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Detect section headers (e.g., "Key Highlights:", "Market Impact:")
+            if stripped and stripped.endswith(':') and len(stripped) < 100:
+                # Save previous section
+                if current_section:
+                    section_text = '\n'.join(current_section)
+                    chunks.extend(self._split_section(section_text))
+                
+                current_header = line
+                current_section = [line]
+            else:
+                current_section.append(line)
+        
+        # Save last section
+        if current_section:
+            section_text = '\n'.join(current_section)
+            chunks.extend(self._split_section(section_text))
+        
+        return [c for c in chunks if c.strip()]
+    
+    def _split_section(self, section_text: str) -> list[str]:
+        """Split a section if it's too large, preserving bullet lists."""
+        if len(section_text) <= self.max_chunk_size:
+            return [section_text]
+        
+        # Try to split by double newline (paragraphs)
+        paragraphs = section_text.split('\n\n')
+        chunks = []
+        current_chunk = ""
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            # Check if adding this paragraph would exceed limit
+            test_chunk = current_chunk + ("\n\n" if current_chunk else "") + para
+            
+            if len(test_chunk) <= self.max_chunk_size:
+                current_chunk = test_chunk
+            else:
+                # Current chunk is full, save it
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # If paragraph itself is too large, split by sentences
+                if len(para) > self.max_chunk_size:
+                    chunks.extend(self._split_by_sentences(para))
+                    current_chunk = ""
+                else:
+                    current_chunk = para
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+    
+    def _split_by_sentences(self, text: str) -> list[str]:
+        """Split text by sentences when it's too large."""
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        chunks = []
+        current_chunk = ""
+        
+        for sentence in sentences:
+            test_chunk = current_chunk + (" " if current_chunk else "") + sentence
+            
+            if len(test_chunk) <= self.max_chunk_size:
+                current_chunk = test_chunk
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # If single sentence is too large, force split
+                if len(sentence) > self.max_chunk_size:
+                    for i in range(0, len(sentence), self.max_chunk_size):
+                        chunks.append(sentence[i:i + self.max_chunk_size])
+                    current_chunk = ""
+                else:
+                    current_chunk = sentence
+        
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        return chunks
+
+
 class HeaderAwareChunker:
     """
     Custom chunker that respects markdown headers.

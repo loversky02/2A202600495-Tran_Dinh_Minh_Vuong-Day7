@@ -39,7 +39,13 @@ class EmbeddingStore:
             else:
                 client = chromadb.Client()
             
-            self._collection = client.get_or_create_collection(name=collection_name)
+            # Delete existing collection if it exists (for clean tests)
+            try:
+                client.delete_collection(name=collection_name)
+            except Exception:
+                pass
+            
+            self._collection = client.create_collection(name=collection_name)
             self._use_chroma = True
         except Exception:
             self._use_chroma = False
@@ -80,14 +86,14 @@ class EmbeddingStore:
         """
         Embed each document's content and store it.
 
-        For ChromaDB: use collection.add(ids=[...], documents=[...], embeddings=[...])
+        For ChromaDB: use collection.upsert(ids=[...], documents=[...], embeddings=[...])
         For in-memory: append dicts to self._store
         """
         if not docs:
             return
         
         if self._use_chroma and self._collection is not None:
-            # Use ChromaDB
+            # Use ChromaDB with upsert (allows duplicate IDs)
             ids = []
             documents = []
             embeddings = []
@@ -95,12 +101,24 @@ class EmbeddingStore:
             
             for doc in docs:
                 embedding = self._embedding_fn(doc.content)
-                ids.append(doc.id)
+                # Make ID unique by appending counter
+                unique_id = f"{doc.id}_{self._next_index}"
+                self._next_index += 1
+                
+                ids.append(unique_id)
                 documents.append(doc.content)
                 embeddings.append(embedding)
-                metadatas.append(doc.metadata)
+                
+                # ChromaDB requires non-empty metadata dict
+                # Add dummy field if metadata is empty
+                metadata = doc.metadata.copy() if doc.metadata else {}
+                if not metadata:
+                    metadata["_dummy"] = "true"
+                # Store original doc_id in metadata for filtering
+                metadata["_original_id"] = doc.id
+                metadatas.append(metadata)
             
-            self._collection.add(
+            self._collection.upsert(
                 ids=ids,
                 documents=documents,
                 embeddings=embeddings,
@@ -127,14 +145,23 @@ class EmbeddingStore:
             )
             
             # Format results
+            # ChromaDB returns distances (lower is better), convert to similarity scores (higher is better)
             formatted_results = []
             if results["documents"] and results["documents"][0]:
                 for i, content in enumerate(results["documents"][0]):
+                    # Convert distance to similarity: similarity = -distance
+                    # This makes higher scores better (consistent with dot product)
+                    distance = results["distances"][0][i] if "distances" in results else 0.0
+                    similarity = -distance  # Negate distance to get similarity
+                    
                     formatted_results.append({
                         "content": content,
-                        "score": results["distances"][0][i] if "distances" in results else 0.0,
+                        "score": similarity,
                         "metadata": results["metadatas"][0][i] if "metadatas" in results else {},
                     })
+            
+            # Sort by score descending (higher is better)
+            formatted_results.sort(key=lambda x: x["score"], reverse=True)
             return formatted_results
         else:
             # Use in-memory store
@@ -163,14 +190,22 @@ class EmbeddingStore:
             )
             
             # Format results
+            # ChromaDB returns distances (lower is better), convert to similarity scores (higher is better)
             formatted_results = []
             if results["documents"] and results["documents"][0]:
                 for i, content in enumerate(results["documents"][0]):
+                    # Convert distance to similarity: similarity = -distance
+                    distance = results["distances"][0][i] if "distances" in results else 0.0
+                    similarity = -distance
+                    
                     formatted_results.append({
                         "content": content,
-                        "score": results["distances"][0][i] if "distances" in results else 0.0,
+                        "score": similarity,
                         "metadata": results["metadatas"][0][i] if "metadatas" in results else {},
                     })
+            
+            # Sort by score descending
+            formatted_results.sort(key=lambda x: x["score"], reverse=True)
             return formatted_results
         else:
             # Use in-memory store with manual filtering
@@ -198,7 +233,14 @@ class EmbeddingStore:
         if self._use_chroma and self._collection is not None:
             # Use ChromaDB
             try:
-                self._collection.delete(ids=[doc_id])
+                # Get all documents with matching original_id in metadata
+                results = self._collection.get(where={"_original_id": doc_id})
+                
+                if not results["ids"]:
+                    return False
+                
+                # Delete all matching documents
+                self._collection.delete(ids=results["ids"])
                 return True
             except Exception:
                 return False

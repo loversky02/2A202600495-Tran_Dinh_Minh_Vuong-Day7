@@ -54,6 +54,15 @@ class OpenAIEmbedder:
         self.client = OpenAI()
 
     def __call__(self, text: str) -> list[float]:
+        # OpenAI has a max token limit of 8192 tokens
+        # Financial/technical text with numbers/symbols uses more tokens per character
+        # Safe limit: ~6000 characters to stay well under 8192 tokens
+        MAX_CHARS = 6000
+        
+        if len(text) > MAX_CHARS:
+            # Truncate text to fit within token limit
+            text = text[:MAX_CHARS]
+        
         response = self.client.embeddings.create(model=self.model_name, input=text)
         return [float(value) for value in response.data[0].embedding]
 
